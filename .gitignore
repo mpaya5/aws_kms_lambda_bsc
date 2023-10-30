@@ -1,0 +1,14 @@
+*.swp
+package-lock.json
+__pycache__
+.pytest_cache
+.env
+.venv
+venv
+*.egg-info
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+.idea
+aws_kms_lambda_ethereum/_lambda/functions/eth_client/crypt_function.py

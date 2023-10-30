@@ -1,0 +1,7 @@
+boto3==1.17.103
+web3==5.23.0
+asn1tools==0.158.0
+eth-account==0.5.9
+eth-utils
+python-dotenv==1.0.0
+cryptography==41.0.1
