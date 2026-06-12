@@ -62,17 +62,29 @@ class AwsKmsLambdaEthereumStack(Stack):
         cfn_cmk.key_spec = 'ECC_SECG_P256K1'
         cfn_cmk.key_usage = 'SIGN_VERIFY'
 
-        eth_client = EthLambda(self, "eth-kms-client",
-                               dir="aws_kms_lambda_ethereum/_lambda/functions/eth_client",
-                               env={"LOG_LEVEL": "DEBUG",
-                                    "KMS_KEY_ID": cmk.key_id,
-                                    "ETH_NETWORK": eth_network
-                                    }
-                               )
+        eth_client = EthLambda(
+            self,
+            "eth-kms-client",
+            dir="aws_kms_lambda_ethereum/_lambda/functions/eth_client",
+            env={
+                "LOG_LEVEL": "WARNING",
+                "KMS_KEY_ID": cmk.key_id,
+                "ETH_NETWORK": eth_network,
+            },
+        )
 
         cmk.grant(eth_client.lf, 'kms:GetPublicKey')
         cmk.grant(eth_client.lf, 'kms:Sign')
 
-        
-        CfnOutput(self, 'KeyID', value=cmk.key_id,
-                  description="KeyID of the KMS-CMK instance used as the Ethereum identity instance")
+        CfnOutput(
+            self,
+            'KeyID',
+            value=cmk.key_id,
+            description="KMS CMK KeyId backing the BSC signer identity",
+        )
+        CfnOutput(
+            self,
+            'SignerFunctionName',
+            value=eth_client.lf.function_name,
+            description="Lambda function name for backend invoke (AWS_LAMBDA_FUNCTION_NAME)",
+        )

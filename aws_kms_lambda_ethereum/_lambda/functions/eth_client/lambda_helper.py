@@ -9,79 +9,85 @@ import asn1tools
 import boto3
 from eth_account import Account
 from eth_account._utils.signing import (
-    encode_transaction, serializable_unsigned_transaction_from_dict)
+    encode_transaction,
+    serializable_unsigned_transaction_from_dict,
+)
+from signing_core import (
+    compute_eip155_v,
+    get_tx_params,
+    normalize_signature_s,
+    resolve_chain_id,
+)
 from web3.auto import w3
-
-from eth_account.datastructures import SignedTransaction
-from eth_utils import to_bytes
-
-from crypt_function import get_cert_key, TTK_decrypt
 
 session = boto3.session.Session()
 
 handler = logging.StreamHandler(sys.stdout)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(lineno)d - %(message)s')
+formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(lineno)d - %(message)s"
+)
 handler.setFormatter(formatter)
 
-_logger = logging.getLogger('app')
-_logger.setLevel(os.getenv('LOGGING_LEVEL', 'WARNING'))
+_logger = logging.getLogger("app")
+_logger.setLevel(os.getenv("LOGGING_LEVEL", "WARNING"))
 _logger.addHandler(handler)
-
-# max value on curve / https://github.com/ethereum/EIPs/blob/master/EIPS/eip-2.md
-SECP256_K1_N = int("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16)
 
 
 class EthKmsParams:
 
-    def __init__(self, kms_key_id: str, eth_network: str):
+    def __init__(self, kms_key_id: str, eth_network: str, chain_id: int):
         self._kms_key_id = kms_key_id
         self._eth_network = eth_network
+        self._chain_id = chain_id
 
     def get_kms_key_id(self) -> str:
         return self._kms_key_id
 
+    def get_eth_network(self) -> str:
+        return self._eth_network
+
+    def get_chain_id(self) -> int:
+        return self._chain_id
+
 
 def get_params() -> EthKmsParams:
-    for param in ['KMS_KEY_ID', 'ETH_NETWORK']:
-        value = os.getenv(param)
+    kms_key_id = os.getenv("KMS_KEY_ID")
+    if not kms_key_id:
+        raise ValueError("missing value for parameter: KMS_KEY_ID")
 
-        if not value:
-            if param in ['ETH_NETWORK']:
-                continue
-            else:
-                raise ValueError('missing value for parameter: {}'.format(param))
+    eth_network = os.getenv("ETH_NETWORK", "bsc")
+    chain_id = resolve_chain_id(eth_network)
 
     return EthKmsParams(
-        kms_key_id=os.getenv('KMS_KEY_ID'),
-        eth_network=os.getenv('ETH_NETWORK')
+        kms_key_id=kms_key_id,
+        eth_network=eth_network,
+        chain_id=chain_id,
     )
 
 
 def get_kms_public_key(key_id: str) -> bytes:
-    client = boto3.client('kms')
+    client = boto3.client("kms")
 
-    response = client.get_public_key(
-        KeyId=key_id
-    )
+    response = client.get_public_key(KeyId=key_id)
 
-    return response['PublicKey']
+    return response["PublicKey"]
 
 
 def sign_kms(key_id: str, msg_hash: bytes) -> dict:
-    client = boto3.client('kms')
+    client = boto3.client("kms")
 
     response = client.sign(
         KeyId=key_id,
         Message=msg_hash,
-        MessageType='DIGEST',
-        SigningAlgorithm='ECDSA_SHA_256'
+        MessageType="DIGEST",
+        SigningAlgorithm="ECDSA_SHA_256",
     )
 
     return response
 
 
 def calc_eth_address(pub_key: bytes) -> str:
-    SUBJECT_ASN = '''
+    SUBJECT_ASN = """
     Key DEFINITIONS ::= BEGIN
 
     SubjectPublicKeyInfo  ::=  SEQUENCE  {
@@ -95,17 +101,17 @@ def calc_eth_address(pub_key: bytes) -> str:
       }
 
     END
-    '''
+    """
 
     key = asn1tools.compile_string(SUBJECT_ASN)
-    key_decoded = key.decode('SubjectPublicKeyInfo', pub_key)
+    key_decoded = key.decode("SubjectPublicKeyInfo", pub_key)
 
-    pub_key_raw = key_decoded['subjectPublicKey'][0]
-    pub_key = pub_key_raw[1:len(pub_key_raw)]
+    pub_key_raw = key_decoded["subjectPublicKey"][0]
+    pub_key = pub_key_raw[1 : len(pub_key_raw)]
 
     # https://www.oreilly.com/library/view/mastering-ethereum/9781491971932/ch04.html
     hex_address = w3.keccak(bytes(pub_key)).hex()
-    eth_address = '0x{}'.format(hex_address[-40:])
+    eth_address = "0x{}".format(hex_address[-40:])
 
     eth_checksum_addr = w3.toChecksumAddress(eth_address)
 
@@ -113,7 +119,7 @@ def calc_eth_address(pub_key: bytes) -> str:
 
 
 def find_eth_signature(params: EthKmsParams, plaintext: bytes) -> dict:
-    SIGNATURE_ASN = '''
+    SIGNATURE_ASN = """
     Signature DEFINITIONS ::= BEGIN
 
     Ecdsa-Sig-Value  ::=  SEQUENCE  {
@@ -121,70 +127,62 @@ def find_eth_signature(params: EthKmsParams, plaintext: bytes) -> dict:
            s     INTEGER  }
 
     END
-    '''
+    """
     signature_schema = asn1tools.compile_string(SIGNATURE_ASN)
 
     signature = sign_kms(params.get_kms_key_id(), plaintext)
 
     # https://tools.ietf.org/html/rfc3279#section-2.2.3
-    signature_decoded = signature_schema.decode('Ecdsa-Sig-Value', signature['Signature'])
-    s = signature_decoded['s']
-    r = signature_decoded['r']
+    signature_decoded = signature_schema.decode(
+        "Ecdsa-Sig-Value", signature["Signature"]
+    )
+    r = signature_decoded["r"]
+    s = normalize_signature_s(signature_decoded["s"])
 
-    secp256_k1_n_half = SECP256_K1_N / 2
-
-    if s > secp256_k1_n_half:
-        s = SECP256_K1_N - s
-
-    return {'r': r, 's': s}
+    return {"r": r, "s": s}
 
 
 def get_recovery_id(msg_hash: bytes, r: int, s: int, eth_checksum_addr: str) -> dict:
     for v in [27, 28]:
-        recovered_addr = Account.recoverHash(message_hash=msg_hash,
-                                             vrs=(v, r, s))
+        recovered_addr = Account.recoverHash(message_hash=msg_hash, vrs=(v, r, s))
 
         if recovered_addr == eth_checksum_addr:
-            return {'recovered_addr': recovered_addr, 'v': v}
+            return {"recovered_addr": recovered_addr, "v": v}
 
     return {}
 
 
-def get_tx_params(event: dict) -> dict:
-    if 'gas' not in event or 'gasPrice' not in event or 'to' not in event or 'data' not in event:
-        return {'operation': 'sign',
-                'error': 'missing parameter - sign requires gas, gasPrice, to, and data to be specified'}
-        
-    transaction = {
-        'gas': event.get('gas'),
-        # 'from': event.get('from'),
-        'chainId': 56,  # ChainID for Binance Smart Chain Mainnet
-        'value': event.get('value'),  # Value is 0 for data transactions
-        'gasPrice': event.get('gasPrice'),
-        'nonce': event.get('nonce'),
-        'to': event.get('to'),
-        'data': event.get('data'),
-        'privateKey': event.get('privateKey')
+def assemble_tx(
+    tx_params: dict, params: EthKmsParams, eth_checksum_addr: str
+) -> dict:
+    if "error" in tx_params:
+        raise ValueError(tx_params["error"])
+
+    tx_unsigned = serializable_unsigned_transaction_from_dict(tx_params)
+    tx_hash = tx_unsigned.hash()
+
+    tx_sig = find_eth_signature(params=params, plaintext=tx_hash)
+    tx_eth_recovered = get_recovery_id(
+        tx_hash, tx_sig["r"], tx_sig["s"], eth_checksum_addr
+    )
+
+    if not tx_eth_recovered:
+        raise ValueError(
+            "could not recover signing address from KMS signature; "
+            "verify KMS_KEY_ID matches the intended BSC account"
+        )
+
+    v = compute_eip155_v(tx_eth_recovered["v"], tx_params["chainId"])
+    tx_encoded = encode_transaction(
+        tx_unsigned, vrs=(v, tx_sig["r"], tx_sig["s"])
+    )
+
+    return {
+        "rawTransaction": tx_encoded.hex(),
+        "hash": w3.keccak(tx_encoded).hex(),
+        "r": tx_sig["r"],
+        "s": tx_sig["s"],
+        "v": v,
+        "from": eth_checksum_addr,
+        "chainId": tx_params["chainId"],
     }
-
-    return transaction
-
-
-def assemble_tx(tx_params: dict, params: EthKmsParams, eth_checksum_addr: str) -> str:
-    # Desencriptamos la clave privada:
-    cert_key = get_cert_key()
-    private_key = TTK_decrypt(cert_key, tx_params['privateKey'])
-    # Creamos la transacción firmada a partir de la transacción codificada
-    # Eliminamos la variable private_key del diccionario tx_params
-    del tx_params['privateKey']
-    signed_tx = w3.eth.account.sign_transaction(tx_params, private_key)
-    # Devolvemos la representación de cadena de la transacción firmada
-    signed_tx_data = {
-        'rawTransaction': signed_tx.rawTransaction.hex(),
-        'hash': signed_tx.hash.hex(),
-        'r': signed_tx.r,
-        's': signed_tx.s,
-        'v': signed_tx.v
-    }
-    # Devolvemos el diccionario como respuesta en formato JSON
-    return signed_tx_data

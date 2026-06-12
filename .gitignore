@@ -11,4 +11,3 @@ venv
 .cdk.staging
 cdk.out
 .idea
-aws_kms_lambda_ethereum/_lambda/functions/eth_client/crypt_function.py
